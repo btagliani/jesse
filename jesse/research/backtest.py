@@ -1,7 +1,7 @@
 import copy
 from typing import Dict, List
 
-from jesse.modes.backtest_mode import load_candles
+from jesse.modes.backtest_mode import _handle_warmup_candles, load_candles
 
 
 def backtest(
@@ -71,6 +71,7 @@ def backtest(
         fast_mode=fast_mode,
     )
 
+
 def _isolated_backtest(
         config: dict,
         routes: List[Dict[str, str]],
@@ -94,7 +95,7 @@ def _isolated_backtest(
     from jesse.config import reset_config, set_config
     from jesse.modes.backtest_mode import simulator
     from jesse.routes import router
-    from jesse.services import required_candles
+    from jesse.services.candle import inject_warmup_candles_to_store
     from jesse.services.validators import validate_routes
     from jesse.store import store
 
@@ -133,8 +134,6 @@ def _isolated_backtest(
     if warmup_candles:
         for c in jesse_config['app']['considering_candles']:
             key = jh.key(c[0], c[1])
-            # update trading_candles
-            trading_candles[key]['candles'] = candles[key]['candles'][warm_up_num:]
             # inject warm-up candles
             inject_warmup_candles_to_store(
                 warmup_candles_dict[key]['candles'],
@@ -190,6 +189,7 @@ def _isolated_backtest(
     store.reset()
 
     return result
+
 
 def _format_config(config):
     """
@@ -264,23 +264,18 @@ def backtest_with_dates(
     # initiate candle store
     store.candles.init_storage(5000)
 
-    candles = load_candles(start_date, finish_date)
+    warmup_candles, candles = load_candles(
+        jh.date_to_timestamp(start_date),
+        jh.date_to_timestamp(finish_date)
+    )
+    _handle_warmup_candles(warmup_candles)
 
-    # assert that the passed candles are 1m candles
-    for key, value in candles.items():
-        candle_set = value['candles']
-        if candle_set[1][0] - candle_set[0][0] != 60_000:
-            raise ValueError(
-                f'Candles passed to the research.backtest() must be 1m candles. '
-                f'\nIf you wish to trade other timeframes, notice that you need to pass it through '
-                f'the timeframe option in your routes. '
-                f'\nThe difference between your candles are {candle_set[1][0] - candle_set[0][0]} milliseconds which more than '
-                f'the accepted 60000 milliseconds.'
-            )
+    # make a copy to make sure we don't mutate the past data causing some issues for multiprocessing tasks
+    trading_candles_dict = copy.deepcopy(candles)
 
     # run backtest simulation
     backtest_result = simulator(
-        candles,
+        trading_candles_dict,
         run_silently,
         hyperparameters=hyperparameters,
         generate_charts=generate_charts,
@@ -289,7 +284,9 @@ def backtest_with_dates(
         generate_csv=generate_csv,
         generate_json=generate_json,
         generate_equity_curve=generate_equity_curve,
-        generate_hyperparameters=generate_hyperparameters
+        generate_hyperparameters=generate_hyperparameters,
+        generate_logs=False,
+        fast_mode=False,
     )
 
     result = {
